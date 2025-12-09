@@ -5,119 +5,118 @@ import (
 	"errors"
 	"strings"
 	"sync"
-	"sync/atomic"
 )
 
-var (
-	ErrCannotDecorate = errors.New("can't be decorated")
+var ErrDecorationNotAllowed = errors.New("can't be decorated")
+
+const (
+	noDecorationMarker  = "no decorator"
+	decorationMark      = "decorated: "
+	noMultiplexingLabel = "no multiplexer"
 )
 
-func PrefixDecoratorFunc(ctx context.Context, input chan string, output chan string) error {
-	const prefix = "decorated: "
+func PrefixDecoratorFunc(ctx context.Context, input <-chan string, output chan<- string) error {
+	defer close(output)
 
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
-		case data, ok := <-input:
-			if !ok {
+			return nil
+		case data, valid := <-input:
+			if !valid {
 				return nil
 			}
 
-			if strings.Contains(data, "no decorator") {
-				return ErrCannotDecorate
+			if strings.Contains(data, noDecorationMarker) {
+				return ErrDecorationNotAllowed
 			}
 
-			result := data
-			if !strings.HasPrefix(data, prefix) {
-				result = prefix + data
+			if !strings.HasPrefix(data, decorationMark) {
+				data = decorationMark + data
 			}
 
 			select {
-			case output <- result:
 			case <-ctx.Done():
-				return ctx.Err()
+				return nil
+			case output <- data:
 			}
 		}
 	}
 }
 
-func SeparatorFunc(ctx context.Context, input chan string, outputs []chan string) error {
-	var counter int64 = 0
+func SeparatorFunc(ctx context.Context, input <-chan string, outputs []chan<- string) error {
+	defer func() {
+		for _, out := range outputs {
+			close(out)
+		}
+	}()
+
+	outputCount := len(outputs)
+	pos := 0
 
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
-		case data, ok := <-input:
-			if !ok {
+			return nil
+		case data, valid := <-input:
+			if !valid {
 				return nil
 			}
 
-			idx := atomic.AddInt64(&counter, 1) - 1
-			channelIdx := int(idx) % len(outputs)
+			if outputCount == 0 {
+				continue
+			}
+
+			target := outputs[pos%outputCount]
+			pos++
 
 			select {
-			case outputs[channelIdx] <- data:
 			case <-ctx.Done():
-				return ctx.Err()
+				return nil
+			case target <- data:
 			}
 		}
 	}
 }
 
-func MultiplexerFunc(ctx context.Context, inputs []chan string, output chan string) error {
-	results := make(chan string, 100)
+func MultiplexerFunc(ctx context.Context, inputs []<-chan string, output chan<- string) error {
+	defer close(output)
+
 	var wg sync.WaitGroup
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	done := make(chan struct{})
 
-	for _, input := range inputs {
+	for _, in := range inputs {
 		wg.Add(1)
-		go func(in chan string) {
+		go func(src <-chan string) {
 			defer wg.Done()
 			for {
 				select {
+				case <-done:
+					return
 				case <-ctx.Done():
 					return
-				case data, ok := <-in:
-					if !ok {
+				case data, valid := <-src:
+					if !valid {
 						return
 					}
 
-					if strings.Contains(data, "no multiplexer") {
+					if strings.Contains(data, noMultiplexingLabel) {
 						continue
 					}
 
 					select {
-					case results <- data:
+					case <-done:
+						return
 					case <-ctx.Done():
 						return
+					case output <- data:
 					}
 				}
 			}
-		}(input)
+		}(in)
 	}
 
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case data, ok := <-results:
-			if !ok {
-				return nil
-			}
-
-			select {
-			case output <- data:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-	}
+	wg.Wait()
+	close(done)
+	return nil
 }
