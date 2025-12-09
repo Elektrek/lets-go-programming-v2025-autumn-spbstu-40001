@@ -40,6 +40,7 @@ type conveyerImpl struct {
 	ctx          context.Context
 	cancel       context.CancelFunc
 	started      bool
+	stopped      bool
 }
 
 type decoratorConfig struct {
@@ -186,8 +187,17 @@ func (c *conveyerImpl) startHandlers() {
 		go func(d decoratorConfig) {
 			defer c.wg.Done()
 
-			inputCh, _ := c.getChannel(d.inputChannel)
-			outputCh, _ := c.getChannel(d.outputChannel)
+			inputCh, exists := c.getChannel(d.inputChannel)
+			if !exists {
+				c.errChan <- fmt.Errorf("input channel %s not found", d.inputChannel)
+				return
+			}
+
+			outputCh, exists := c.getChannel(d.outputChannel)
+			if !exists {
+				c.errChan <- fmt.Errorf("output channel %s not found", d.outputChannel)
+				return
+			}
 
 			if err := d.fn(c.ctx, inputCh, outputCh); err != nil {
 				select {
@@ -206,10 +216,19 @@ func (c *conveyerImpl) startHandlers() {
 
 			inputs := make([]chan string, len(m.inputChannels))
 			for i, name := range m.inputChannels {
-				ch, _ := c.getChannel(name)
+				ch, exists := c.getChannel(name)
+				if !exists {
+					c.errChan <- fmt.Errorf("input channel %s not found", name)
+					return
+				}
 				inputs[i] = ch
 			}
-			outputCh, _ := c.getChannel(m.outputChannel)
+
+			outputCh, exists := c.getChannel(m.outputChannel)
+			if !exists {
+				c.errChan <- fmt.Errorf("output channel %s not found", m.outputChannel)
+				return
+			}
 
 			if err := m.fn(c.ctx, inputs, outputCh); err != nil {
 				select {
@@ -226,10 +245,19 @@ func (c *conveyerImpl) startHandlers() {
 		go func(s separatorConfig) {
 			defer c.wg.Done()
 
-			inputCh, _ := c.getChannel(s.inputChannel)
+			inputCh, exists := c.getChannel(s.inputChannel)
+			if !exists {
+				c.errChan <- fmt.Errorf("input channel %s not found", s.inputChannel)
+				return
+			}
+
 			outputs := make([]chan string, len(s.outputChannels))
 			for i, name := range s.outputChannels {
-				ch, _ := c.getChannel(name)
+				ch, exists := c.getChannel(name)
+				if !exists {
+					c.errChan <- fmt.Errorf("output channel %s not found", name)
+					return
+				}
 				outputs[i] = ch
 			}
 
@@ -250,32 +278,37 @@ func (c *conveyerImpl) startHandlers() {
 }
 
 func (c *conveyerImpl) stop() {
+	c.mu.Lock()
+	if c.stopped {
+		c.mu.Unlock()
+		return
+	}
+	c.stopped = true
+	c.mu.Unlock()
+
 	if c.cancel != nil {
 		c.cancel()
 	}
 
+	c.wg.Wait()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
 	for name, ch := range c.channels {
-		select {
-		case _, ok := <-ch:
-			if ok {
-				close(ch)
-			}
-		default:
-			close(ch)
-		}
+		close(ch)
 		delete(c.channels, name)
 	}
 }
 
 func (c *conveyerImpl) Send(input string, data string) error {
-	if !c.started {
-		return errors.New("conveyer not started")
+	c.mu.RLock()
+	if c.stopped {
+		c.mu.RUnlock()
+		return errors.New("conveyer stopped")
 	}
+	ch, exists := c.channels[input]
+	c.mu.RUnlock()
 
-	ch, exists := c.getChannel(input)
 	if !exists {
 		return errors.New("chan not found")
 	}
@@ -291,11 +324,14 @@ func (c *conveyerImpl) Send(input string, data string) error {
 }
 
 func (c *conveyerImpl) Recv(output string) (string, error) {
-	if !c.started {
-		return "", errors.New("conveyer not started")
+	c.mu.RLock()
+	if c.stopped {
+		c.mu.RUnlock()
+		return "", errors.New("conveyer stopped")
 	}
+	ch, exists := c.channels[output]
+	c.mu.RUnlock()
 
-	ch, exists := c.getChannel(output)
 	if !exists {
 		return "", errors.New("chan not found")
 	}
