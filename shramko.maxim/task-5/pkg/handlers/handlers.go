@@ -15,7 +15,7 @@ const (
 	noMultiplexingLabel = "no multiplexer"
 )
 
-func PrefixDecoratorFunc(ctx context.Context, input <-chan string, output chan<- string) error {
+func PrefixDecoratorFunc(ctx context.Context, input chan string, output chan string) error {
 	defer close(output)
 
 	for {
@@ -44,7 +44,7 @@ func PrefixDecoratorFunc(ctx context.Context, input <-chan string, output chan<-
 	}
 }
 
-func SeparatorFunc(ctx context.Context, input <-chan string, outputs []chan<- string) error {
+func SeparatorFunc(ctx context.Context, input chan string, outputs []chan string) error {
 	defer func() {
 		for _, out := range outputs {
 			close(out)
@@ -79,7 +79,7 @@ func SeparatorFunc(ctx context.Context, input <-chan string, outputs []chan<- st
 	}
 }
 
-func MultiplexerFunc(ctx context.Context, inputs []<-chan string, output chan<- string) error {
+func MultiplexerFunc(ctx context.Context, inputs []chan string, output chan string) error {
 	defer close(output)
 
 	var wg sync.WaitGroup
@@ -87,7 +87,7 @@ func MultiplexerFunc(ctx context.Context, inputs []<-chan string, output chan<- 
 
 	for _, in := range inputs {
 		wg.Add(1)
-		go func(src <-chan string) {
+		go func(src chan string) {
 			defer wg.Done()
 			for {
 				select {
